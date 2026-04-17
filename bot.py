@@ -4,6 +4,7 @@ from discord.ext import tasks, commands
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
 import asyncio
+import datetime  # 時間を扱うために追加！
 
 # .envファイルから設定を読み込む
 load_dotenv()
@@ -14,7 +15,7 @@ CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID"))
 # 検索条件
 OR_KEYWORDS = ["音声作品"]
 AND_KEYWORDS = ["ASMR", "Vtuber", "2DLive", "Live2d", "3DLive"]
-EXCLUDE_KEYWORDS = [ ]
+EXCLUDE_KEYWORDS = []
 
 # 通知済み動画を記録するファイル名
 SENT_VIDEOS_FILE = "sent_ids.txt"
@@ -44,11 +45,15 @@ def save_sent_id(video_id):
 @bot.event
 async def on_ready():
     print(f"ログインしました: {bot.user.name}")
-    # 12時間おきのループを開始
+    # 定期実行ループを開始
     search_loop.start()
 
 
-@tasks.loop(hours=12)
+JST = datetime.timezone(datetime.timedelta(hours=+9), 'JST')
+target_time = datetime.time(hour=20, minute=0, second=0, tzinfo=JST)
+
+
+@tasks.loop(time=target_time)
 async def search_loop():
     print("定期検索を開始します……")
     channel = bot.get_channel(CHANNEL_ID)
@@ -56,11 +61,11 @@ async def search_loop():
         print("通知先のチャンネルがありません")
         return
 
-    # 検索クエリの作成
+    # 検索クエリの作成（EXCLUDE_KEYWORDSが空っぽでもエラーにならないように調整）
     or_query = f"({'|'.join(OR_KEYWORDS)})"
     and_query = f"({'|'.join(AND_KEYWORDS)})"
-    exclude_query = f"({' -'.join([''] + EXCLUDE_KEYWORDS)})"  # NOT検索用に修正
-    final_q = f"{or_query} {and_query} {exclude_query}"
+    exclude_query = f"({' -'.join([''] + EXCLUDE_KEYWORDS)})" if EXCLUDE_KEYWORDS else ""
+    final_q = f"{or_query} {and_query} {exclude_query}".strip()
 
     try:
         # YouTube検索実行
@@ -76,7 +81,7 @@ async def search_loop():
 
         sent_ids = load_sent_ids()
         seen_channels = set()
-        new_notifications = 0
+        new_videos = []  # ★見つかった新しい動画を一時的に貯めるリスト
 
         for item in response.get('items', []):
             video_id = item['id']['videoId']
@@ -87,18 +92,23 @@ async def search_loop():
                 title = item['snippet']['title']
                 url = f"https://www.youtube.com/watch?v={video_id}"
 
-                # Discordに送信
-                await channel.send(f"【新着ASMR】\nタイトル: {title}\nURL: {url}")
+                # リストに「タイトルとURL」を追加する
+                new_videos.append(f"・{title}\n  {url}")
 
                 # 記録を更新
                 save_sent_id(video_id)
                 seen_channels.add(channel_id)
-                new_notifications += 1
 
-                # API負荷軽減のための小さな待機
-                await asyncio.sleep(1)
+        # ---ここでまとめて1件のメッセージとして送信する ---
+        if new_videos:
+            # リストに貯めた動画を改行でつなげて、1つの文章にする
+            report_message = "【今日はこいつらで寝ろってこと！！！！！】\n\n" + "\n\n".join(new_videos)
 
-        print(f"検索完了。新しく {new_notifications} 件通知しました。定期検索を終了します……")
+            #Discordに通知
+            await channel.send(report_message)
+            print(f"検索完了。新しく {len(new_videos)} 件まとめて通知しました。定期検索を終了します……")
+        else:
+            print("検索完了。新しい動画は見つかりませんでした。定期検索を終了します……")
 
     except Exception as e:
         print(f"エラーが発生しちゃった: {e}")
